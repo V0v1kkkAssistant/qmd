@@ -189,6 +189,25 @@ export const DEFAULT_EMBED_MODEL_URI = DEFAULT_EMBED_MODEL;
 export const DEFAULT_RERANK_MODEL_URI = DEFAULT_RERANK_MODEL;
 export const DEFAULT_GENERATE_MODEL_URI = DEFAULT_GENERATE_MODEL;
 
+export type LLMMode = "local" | "remote";
+
+export type RemoteApiConfig = {
+  baseUrl: string;
+  apiKey?: string;
+  embedModel?: string;
+  rerankModel?: string;
+  generateModel?: string;
+  timeoutMs: number;
+  rerankPaths: string[];
+};
+
+export class RerankNotSupportedError extends Error {
+  constructor(message = "Remote API does not provide a compatible rerank endpoint") {
+    super(message);
+    this.name = "RerankNotSupportedError";
+  }
+}
+
 // Local model cache directory
 const MODEL_CACHE_DIR = join(homedir(), ".cache", "qmd", "models");
 export const DEFAULT_MODEL_CACHE_DIR = MODEL_CACHE_DIR;
@@ -290,6 +309,17 @@ export async function pullModels(
 // =============================================================================
 
 /**
+ * Device/runtime info for status display.
+ */
+export type DeviceInfo = {
+  gpu: string | false;
+  gpuOffloading: boolean;
+  gpuDevices: string[];
+  vram?: { total: number; used: number; free: number };
+  cpuCores: number;
+};
+
+/**
  * Abstract LLM interface - implement this for different backends
  */
 export interface LLM {
@@ -297,6 +327,11 @@ export interface LLM {
    * Get embeddings for text
    */
   embed(text: string, options?: EmbedOptions): Promise<EmbeddingResult | null>;
+
+  /**
+   * Batch embeddings for multiple texts
+   */
+  embedBatch(texts: string[]): Promise<(EmbeddingResult | null)[]>;
 
   /**
    * Generate text completion
@@ -321,6 +356,11 @@ export interface LLM {
   rerank(query: string, documents: RerankDocument[], options?: RerankOptions): Promise<RerankResult>;
 
   /**
+   * Optional device info for status display
+   */
+  getDeviceInfo?(): Promise<DeviceInfo>;
+
+  /**
    * Dispose of resources
    */
   dispose(): Promise<void>;
@@ -331,6 +371,8 @@ export interface LLM {
 // =============================================================================
 
 export type LlamaCppConfig = {
+  mode?: LLMMode;
+  remoteApi?: RemoteApiConfig;
   embedModel?: string;
   generateModel?: string;
   rerankModel?: string;
@@ -366,6 +408,9 @@ export class LlamaCpp implements LLM {
   private rerankModel: LlamaModel | null = null;
   private rerankContexts: Awaited<ReturnType<LlamaModel["createRankingContext"]>>[] = [];
 
+  private mode: LLMMode;
+  private remoteApi: RemoteApiConfig | null;
+
   private embedModelUri: string;
   private generateModelUri: string;
   private rerankModelUri: string;
@@ -386,6 +431,9 @@ export class LlamaCpp implements LLM {
 
 
   constructor(config: LlamaCppConfig = {}) {
+    this.mode = config.mode || "local";
+    this.remoteApi = config.remoteApi || null;
+
     this.embedModelUri = config.embedModel || DEFAULT_EMBED_MODEL;
     this.generateModelUri = config.generateModel || DEFAULT_GENERATE_MODEL;
     this.rerankModelUri = config.rerankModel || DEFAULT_RERANK_MODEL;
@@ -430,6 +478,53 @@ export class LlamaCpp implements LLM {
    */
   private hasLoadedContexts(): boolean {
     return !!(this.embedContexts.length > 0 || this.rerankContexts.length > 0);
+  }
+
+  private isRemoteEnabled(): boolean {
+    return this.mode === "remote" && !!this.remoteApi;
+  }
+
+  private getRemoteModel(kind: "embed" | "generate" | "rerank", requested?: string): string {
+    if (requested) return requested;
+    if (kind === "embed") return this.remoteApi?.embedModel || this.embedModelUri;
+    if (kind === "generate") return this.remoteApi?.generateModel || this.generateModelUri;
+    return this.remoteApi?.rerankModel || this.rerankModelUri;
+  }
+
+  private async remoteRequest(path: string, payload: unknown): Promise<unknown> {
+    if (!this.remoteApi) {
+      throw new Error("Remote API is not configured");
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.remoteApi.timeoutMs);
+    timeout.unref();
+
+    try {
+      const base = this.remoteApi.baseUrl.replace(/\/$/, "");
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (this.remoteApi.apiKey) {
+        headers.Authorization = `Bearer ${this.remoteApi.apiKey}`;
+      }
+
+      const response = await fetch(`${base}${path}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(`HTTP ${response.status} ${response.statusText}${body ? ` - ${body.slice(0, 300)}` : ""}`);
+      }
+
+      return await response.json();
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   /**
@@ -770,6 +865,12 @@ export class LlamaCpp implements LLM {
    * Returns tokenizer tokens (opaque type from node-llama-cpp)
    */
   async tokenize(text: string): Promise<readonly LlamaToken[]> {
+    if (this.isRemoteEnabled()) {
+      // Fallback tokenizer for remote mode: byte-level tokens.
+      // Good enough for chunk sizing when local tokenizer is unavailable.
+      return Array.from(new TextEncoder().encode(text)) as unknown as readonly LlamaToken[];
+    }
+
     await this.ensureEmbedContext();  // Ensure model is loaded
     if (!this.embedModel) {
       throw new Error("Embed model not loaded");
@@ -789,6 +890,10 @@ export class LlamaCpp implements LLM {
    * Detokenize token IDs back to text
    */
   async detokenize(tokens: readonly LlamaToken[]): Promise<string> {
+    if (this.isRemoteEnabled()) {
+      return new TextDecoder().decode(Uint8Array.from(tokens as unknown as number[]));
+    }
+
     await this.ensureEmbedContext();
     if (!this.embedModel) {
       throw new Error("Embed model not loaded");
@@ -803,6 +908,22 @@ export class LlamaCpp implements LLM {
   async embed(text: string, options: EmbedOptions = {}): Promise<EmbeddingResult | null> {
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
+
+    if (this.isRemoteEnabled()) {
+      try {
+        const model = this.getRemoteModel("embed", options.model);
+        const result = await this.remoteRequest("/v1/embeddings", { model, input: text }) as {
+          data?: Array<{ embedding?: number[] }>;
+          model?: string;
+        };
+        const embedding = result.data?.[0]?.embedding;
+        if (!embedding) return null;
+        return { embedding, model: result.model || model };
+      } catch (error) {
+        console.error("Remote embedding error:", error);
+        return null;
+      }
+    }
 
     try {
       const context = await this.ensureEmbedContext();
@@ -827,6 +948,28 @@ export class LlamaCpp implements LLM {
     this.touchActivity();
 
     if (texts.length === 0) return [];
+
+    if (this.isRemoteEnabled()) {
+      try {
+        const model = this.getRemoteModel("embed");
+        const result = await this.remoteRequest("/v1/embeddings", { model, input: texts }) as {
+          data?: Array<{ embedding?: number[]; index?: number }>;
+          model?: string;
+        };
+
+        const out: (EmbeddingResult | null)[] = Array.from({ length: texts.length }, () => null);
+        for (const row of result.data || []) {
+          const idx = row.index ?? -1;
+          if (idx >= 0 && idx < out.length && row.embedding) {
+            out[idx] = { embedding: row.embedding, model: result.model || model };
+          }
+        }
+        return out;
+      } catch (error) {
+        console.error("Remote batch embedding error:", error);
+        return texts.map(() => null);
+      }
+    }
 
     try {
       const contexts = await this.ensureEmbedContexts();
@@ -884,6 +1027,30 @@ export class LlamaCpp implements LLM {
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
 
+    if (this.isRemoteEnabled()) {
+      try {
+        const model = this.getRemoteModel("generate", options.model);
+        const result = await this.remoteRequest("/v1/chat/completions", {
+          model,
+          temperature: options.temperature ?? 0.7,
+          max_tokens: options.maxTokens ?? 150,
+          messages: [{ role: "user", content: prompt }],
+        }) as {
+          choices?: Array<{ message?: { content?: string } }>;
+          model?: string;
+        };
+
+        return {
+          text: result.choices?.[0]?.message?.content || "",
+          model: result.model || model,
+          done: true,
+        };
+      } catch (error) {
+        console.error("Remote generation error:", error);
+        return null;
+      }
+    }
+
     // Ensure model is loaded
     await this.ensureGenerateModel();
 
@@ -921,6 +1088,10 @@ export class LlamaCpp implements LLM {
   }
 
   async modelExists(modelUri: string): Promise<ModelInfo> {
+    if (this.isRemoteEnabled()) {
+      return { name: modelUri, exists: true };
+    }
+
     // For HuggingFace URIs, we assume they exist
     // For local paths, check if file exists
     if (modelUri.startsWith("hf:")) {
@@ -943,11 +1114,53 @@ export class LlamaCpp implements LLM {
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
 
-    const llama = await this.ensureLlama();
-    await this.ensureGenerateModel();
-
     const includeLexical = options.includeLexical ?? true;
     const context = options.context;
+
+    if (this.isRemoteEnabled()) {
+      const contextNote = context ? `\nContext: ${context}` : "";
+      const prompt = [
+        "Expand this search query into up to 6 lines for hybrid retrieval.",
+        "Output strictly one item per line, each as: <type>: <text>",
+        "Allowed types: lex, vec, hyde",
+        `Query: ${query}${contextNote}`,
+      ].join("\n");
+
+      try {
+        const generated = await this.generate(prompt, {
+          model: this.getRemoteModel("generate"),
+          maxTokens: 400,
+          temperature: 0.3,
+        });
+
+        const lines = (generated?.text || "").trim().split("\n");
+        const parsed: Queryable[] = lines
+          .map((line) => {
+            const colonIdx = line.indexOf(":");
+            if (colonIdx === -1) return null;
+            const type = line.slice(0, colonIdx).trim();
+            const text = line.slice(colonIdx + 1).trim();
+            if ((type !== "lex" && type !== "vec" && type !== "hyde") || !text) return null;
+            return { type: type as QueryType, text };
+          })
+          .filter((q): q is Queryable => q !== null);
+
+        const filtered = includeLexical ? parsed : parsed.filter((q) => q.type !== "lex");
+        if (filtered.length > 0) return filtered;
+      } catch (error) {
+        console.error("Remote query expansion failed:", error);
+      }
+
+      const fallback: Queryable[] = [
+        { type: "hyde", text: `Information about ${query}` },
+        { type: "lex", text: query },
+        { type: "vec", text: query },
+      ];
+      return includeLexical ? fallback : fallback.filter((q) => q.type !== "lex");
+    }
+
+    const llama = await this.ensureLlama();
+    await this.ensureGenerateModel();
 
     const grammar = await llama.createGrammar({
       grammar: `
@@ -1033,6 +1246,53 @@ export class LlamaCpp implements LLM {
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
 
+    if (this.isRemoteEnabled()) {
+      const model = this.getRemoteModel("rerank", options.model);
+      const payload = {
+        model,
+        query,
+        documents: documents.map((doc) => doc.text),
+        top_n: documents.length,
+      };
+
+      let lastError: unknown = null;
+      for (const path of this.remoteApi?.rerankPaths || []) {
+        try {
+          const result = await this.remoteRequest(path, payload) as {
+            results?: Array<{ index: number; relevance_score?: number; score?: number }>;
+            data?: Array<{ index: number; relevance_score?: number; score?: number }>;
+            model?: string;
+          };
+
+          const rows = result.results || result.data || [];
+          const byIndex = new Map<number, number>();
+          for (const row of rows) {
+            const score = row.relevance_score ?? row.score ?? 0;
+            byIndex.set(row.index, score);
+          }
+
+          const ranked = documents
+            .map((doc, index) => ({ file: doc.file, index, score: byIndex.get(index) ?? 0 }))
+            .sort((a, b) => b.score - a.score);
+
+          return {
+            results: ranked,
+            model: result.model || model,
+          };
+        } catch (error) {
+          lastError = error;
+          const msg = error instanceof Error ? error.message : String(error);
+          if (!msg.includes("HTTP 404") && !msg.includes("HTTP 405")) {
+            throw error;
+          }
+        }
+      }
+
+      throw new RerankNotSupportedError(
+        `No compatible rerank endpoint found under configured paths (${this.remoteApi?.rerankPaths.join(", ") || "none"}). ${lastError ? `Last error: ${String(lastError)}` : ""}`
+      );
+    }
+
     const contexts = await this.ensureRerankContexts();
     const model = await this.ensureRerankModel();
 
@@ -1096,13 +1356,16 @@ export class LlamaCpp implements LLM {
    * Get device/GPU info for status display.
    * Initializes llama if not already done.
    */
-  async getDeviceInfo(): Promise<{
-    gpu: string | false;
-    gpuOffloading: boolean;
-    gpuDevices: string[];
-    vram?: { total: number; used: number; free: number };
-    cpuCores: number;
-  }> {
+  async getDeviceInfo(): Promise<DeviceInfo> {
+    if (this.isRemoteEnabled()) {
+      return {
+        gpu: "remote-api",
+        gpuOffloading: true,
+        gpuDevices: [this.remoteApi?.baseUrl || "remote"],
+        cpuCores: 0,
+      };
+    }
+
     const llama = await this.ensureLlama();
     const gpuDevices = await llama.getGpuDeviceNames();
     let vram: { total: number; used: number; free: number } | undefined;
@@ -1391,12 +1654,54 @@ export function canUnloadLLM(): boolean {
 
 let defaultLlamaCpp: LlamaCpp | null = null;
 
+function parseRerankPaths(input?: string): string[] {
+  const defaultPaths = ["/v1/rerank", "/rerank", "/v1/re-rank"];
+  if (!input || !input.trim()) return defaultPaths;
+  const parsed = input.split(",").map((p) => p.trim()).filter(Boolean).map((p) => (p.startsWith("/") ? p : `/${p}`));
+  return parsed.length > 0 ? parsed : defaultPaths;
+}
+
+function getLlamaConfigFromEnv(): LlamaCppConfig {
+  const modeEnv = (process.env.QMD_LLM_MODE || "").toLowerCase();
+  const baseUrl = process.env.QMD_REMOTE_API_BASE_URL;
+  const mode: LLMMode = (modeEnv === "remote" || (!!baseUrl && modeEnv !== "local")) ? "remote" : "local";
+
+  if (mode === "remote") {
+    if (!baseUrl) {
+      throw new Error("QMD remote mode requires QMD_REMOTE_API_BASE_URL");
+    }
+
+    return {
+      mode,
+      remoteApi: {
+        baseUrl,
+        apiKey: process.env.QMD_REMOTE_API_KEY,
+        embedModel: process.env.QMD_REMOTE_API_EMBED_MODEL,
+        rerankModel: process.env.QMD_REMOTE_API_RERANK_MODEL,
+        generateModel: process.env.QMD_REMOTE_API_GENERATE_MODEL,
+        timeoutMs: Number(process.env.QMD_REMOTE_API_TIMEOUT_MS || "30000"),
+        rerankPaths: parseRerankPaths(process.env.QMD_REMOTE_API_RERANK_PATHS),
+      },
+      embedModel: process.env.QMD_REMOTE_API_EMBED_MODEL || DEFAULT_EMBED_MODEL,
+      rerankModel: process.env.QMD_REMOTE_API_RERANK_MODEL || DEFAULT_RERANK_MODEL,
+      generateModel: process.env.QMD_REMOTE_API_GENERATE_MODEL || DEFAULT_GENERATE_MODEL,
+    };
+  }
+
+  return {
+    mode: "local",
+    embedModel: process.env.QMD_EMBED_MODEL || DEFAULT_EMBED_MODEL,
+    rerankModel: process.env.QMD_RERANK_MODEL || DEFAULT_RERANK_MODEL,
+    generateModel: process.env.QMD_GENERATE_MODEL || DEFAULT_GENERATE_MODEL,
+  };
+}
+
 /**
  * Get the default LlamaCpp instance (creates one if needed)
  */
 export function getDefaultLlamaCpp(): LlamaCpp {
   if (!defaultLlamaCpp) {
-    defaultLlamaCpp = new LlamaCpp();
+    defaultLlamaCpp = new LlamaCpp(getLlamaConfigFromEnv());
   }
   return defaultLlamaCpp;
 }
