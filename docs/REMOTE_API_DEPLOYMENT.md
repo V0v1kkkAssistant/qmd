@@ -45,17 +45,15 @@ QMD_GENERATE_MODEL_FILE=qmd-query-expansion-1.7b-q4_k_m.gguf
 QMD_RERANK_MODEL_FILE=qwen3-reranker-0.6b-q8_0.gguf
 
 # Optional runtime tuning
-QMD_EMBED_CTX_SIZE=2048
-QMD_GENERATE_CTX_SIZE=4096
 QMD_RERANK_CTX_SIZE=2048
 ```
 
-Why these context defaults:
-- `embed=2048` is a practical low-memory setting for chunk-sized inputs.
-- `rerank=2048` aligns with qmd-side rerank assumptions and keeps VRAM predictable.
-- `generate=4096` gives query-expansion enough headroom without being too heavy.
+Context behavior aligned to original qmd defaults:
+- **embed:** no explicit server `ctx-size` (runtime/model default)
+- **generate:** no explicit server `ctx-size` (runtime/model default)
+- **rerank:** default `2048` (matches qmd code path)
 
-You can lower them for tighter memory budgets or raise if your workload needs longer inputs.
+If needed, you can still tune batch sizes and rerank ctx based on hardware.
 
 ## 3) Start stack
 
