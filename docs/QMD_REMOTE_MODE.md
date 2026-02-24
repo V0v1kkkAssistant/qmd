@@ -74,6 +74,12 @@ QMD tries rerank paths in order (default):
 
 If all candidates are unsupported (404/405), QMD falls back to retrieval-order scoring so searches still complete.
 
+## Deployment note
+
+QMD only requires an OpenAI-compatible base URL and optional bearer key.
+A concrete multi-service deployment (including llama.cpp `llama-server` + authenticated gateway)
+can be kept outside the core repo so upstream changes stay focused on `src/` + API behavior.
+
 ## Migration notes
 
 - Existing local installs need **no change**.
