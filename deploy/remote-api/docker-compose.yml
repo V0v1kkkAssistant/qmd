@@ -1,5 +1,9 @@
 version: "3.9"
 
+# CPU-safe default stack (works without NVIDIA runtime).
+# For GPU acceleration, use:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
 services:
   gateway:
     image: nginx:1.27-alpine
@@ -22,7 +26,7 @@ services:
 
   # OpenAI-compatible embeddings endpoint
   llama-embed:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    image: ${QMD_LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
     container_name: qmd-llama-embed
     restart: unless-stopped
     command: >
@@ -31,19 +35,14 @@ services:
       --model /models/${QMD_EMBED_MODEL_FILE:-embeddinggemma-300m-q8_0.gguf}
       --alias ${QMD_EMBED_MODEL_NAME:-embeddinggemma-300m}
       --embedding
-      --ctx-size 2048
-      --batch-size 512
+      --ctx-size ${QMD_EMBED_CTX_SIZE:-2048}
+      --batch-size ${QMD_EMBED_BATCH_SIZE:-512}
     volumes:
       - ${QMD_MODEL_DIR:-./models}:/models:ro
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
 
   # OpenAI-compatible chat/completions endpoint
   llama-generate:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    image: ${QMD_LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
     container_name: qmd-llama-generate
     restart: unless-stopped
     command: >
@@ -51,19 +50,14 @@ services:
       --port 8012
       --model /models/${QMD_GENERATE_MODEL_FILE:-qmd-query-expansion-1.7b-q4_k_m.gguf}
       --alias ${QMD_GENERATE_MODEL_NAME:-qmd-query-expansion-1.7b}
-      --ctx-size 4096
-      --batch-size 512
+      --ctx-size ${QMD_GENERATE_CTX_SIZE:-4096}
+      --batch-size ${QMD_GENERATE_BATCH_SIZE:-512}
     volumes:
       - ${QMD_MODEL_DIR:-./models}:/models:ro
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
 
   # Rerank endpoint (/rerank)
   llama-rerank:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    image: ${QMD_LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
     container_name: qmd-llama-rerank
     restart: unless-stopped
     command: >
@@ -72,12 +66,7 @@ services:
       --model /models/${QMD_RERANK_MODEL_FILE:-qwen3-reranker-0.6b-q8_0.gguf}
       --alias ${QMD_RERANK_MODEL_NAME:-qwen3-reranker-0.6b}
       --reranking
-      --ctx-size 2048
-      --batch-size 256
+      --ctx-size ${QMD_RERANK_CTX_SIZE:-2048}
+      --batch-size ${QMD_RERANK_BATCH_SIZE:-256}
     volumes:
       - ${QMD_MODEL_DIR:-./models}:/models:ro
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]

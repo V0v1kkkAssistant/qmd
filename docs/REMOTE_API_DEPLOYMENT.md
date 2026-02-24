@@ -18,7 +18,8 @@ Endpoints exposed by gateway:
 
 Compose files live in:
 
-- `deploy/remote-api/docker-compose.yml`
+- `deploy/remote-api/docker-compose.yml` (CPU-safe base)
+- `deploy/remote-api/docker-compose.gpu.yml` (optional NVIDIA override)
 - `deploy/remote-api/nginx.conf.template`
 
 ## 1) Prepare model files
@@ -42,13 +43,34 @@ QMD_MODEL_DIR=./models
 QMD_EMBED_MODEL_FILE=embeddinggemma-300m-q8_0.gguf
 QMD_GENERATE_MODEL_FILE=qmd-query-expansion-1.7b-q4_k_m.gguf
 QMD_RERANK_MODEL_FILE=qwen3-reranker-0.6b-q8_0.gguf
+
+# Optional runtime tuning
+QMD_EMBED_CTX_SIZE=2048
+QMD_GENERATE_CTX_SIZE=4096
+QMD_RERANK_CTX_SIZE=2048
 ```
 
+Why these context defaults:
+- `embed=2048` is a practical low-memory setting for chunk-sized inputs.
+- `rerank=2048` aligns with qmd-side rerank assumptions and keeps VRAM predictable.
+- `generate=4096` gives query-expansion enough headroom without being too heavy.
+
+You can lower them for tighter memory budgets or raise if your workload needs longer inputs.
+
 ## 3) Start stack
+
+CPU mode (default):
 
 ```bash
 cd deploy/remote-api
 docker compose up -d
+```
+
+NVIDIA GPU mode:
+
+```bash
+cd deploy/remote-api
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 ```
 
 ## 4) Configure QMD client

@@ -1,0 +1,30 @@
+version: "3.9"
+
+# Optional GPU override for NVIDIA hosts.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+services:
+  llama-embed:
+    image: ${QMD_LLAMA_GPU_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+  llama-generate:
+    image: ${QMD_LLAMA_GPU_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+  llama-rerank:
+    image: ${QMD_LLAMA_GPU_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]

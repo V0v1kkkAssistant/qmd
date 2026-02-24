@@ -59,7 +59,7 @@ qmd search "API" --all --files --min-score 0.3
 QMD supports a remote mode for embeddings, generation, and reranking via OpenAI-compatible HTTP endpoints.
 
 - Client config and behavior: `docs/QMD_REMOTE_MODE.md`
-- Server deployment (llama.cpp-native + single auth gateway): `docs/REMOTE_API_DEPLOYMENT.md`
+- Server deployment (llama.cpp-native + single auth gateway, CPU/GPU variants): `docs/REMOTE_API_DEPLOYMENT.md`
 
 Quick client env:
 
