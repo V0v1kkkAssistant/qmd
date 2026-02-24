@@ -1,0 +1,83 @@
+version: "3.9"
+
+services:
+  gateway:
+    image: nginx:1.27-alpine
+    container_name: qmd-api-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - QMD_GATEWAY_API_KEY=${QMD_GATEWAY_API_KEY:-change-me}
+    volumes:
+      - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      # Optional: add extra key maps for multi-key auth later
+      - ./authorized-keys:/etc/nginx/conf.d/authorized-keys:ro
+    command: >
+      /bin/sh -lc "envsubst '$$QMD_GATEWAY_API_KEY' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
+    depends_on:
+      - llama-embed
+      - llama-generate
+      - llama-rerank
+
+  # OpenAI-compatible embeddings endpoint
+  llama-embed:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: qmd-llama-embed
+    restart: unless-stopped
+    command: >
+      --host 0.0.0.0
+      --port 8011
+      --model /models/${QMD_EMBED_MODEL_FILE:-embeddinggemma-300m-q8_0.gguf}
+      --alias ${QMD_EMBED_MODEL_NAME:-embeddinggemma-300m}
+      --embedding
+      --ctx-size 2048
+      --batch-size 512
+    volumes:
+      - ${QMD_MODEL_DIR:-./models}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+  # OpenAI-compatible chat/completions endpoint
+  llama-generate:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: qmd-llama-generate
+    restart: unless-stopped
+    command: >
+      --host 0.0.0.0
+      --port 8012
+      --model /models/${QMD_GENERATE_MODEL_FILE:-qmd-query-expansion-1.7b-q4_k_m.gguf}
+      --alias ${QMD_GENERATE_MODEL_NAME:-qmd-query-expansion-1.7b}
+      --ctx-size 4096
+      --batch-size 512
+    volumes:
+      - ${QMD_MODEL_DIR:-./models}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+  # Rerank endpoint (/rerank)
+  llama-rerank:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: qmd-llama-rerank
+    restart: unless-stopped
+    command: >
+      --host 0.0.0.0
+      --port 8013
+      --model /models/${QMD_RERANK_MODEL_FILE:-qwen3-reranker-0.6b-q8_0.gguf}
+      --alias ${QMD_RERANK_MODEL_NAME:-qwen3-reranker-0.6b}
+      --reranking
+      --ctx-size 2048
+      --batch-size 256
+    volumes:
+      - ${QMD_MODEL_DIR:-./models}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]

@@ -80,6 +80,10 @@ QMD only requires an OpenAI-compatible base URL and optional bearer key.
 A concrete multi-service deployment (including llama.cpp `llama-server` + authenticated gateway)
 can be kept outside the core repo so upstream changes stay focused on `src/` + API behavior.
 
+## Deployment
+
+See `docs/REMOTE_API_DEPLOYMENT.md` for a full llama.cpp-native server deployment with a single authenticated endpoint.
+
 ## Migration notes
 
 - Existing local installs need **no change**.

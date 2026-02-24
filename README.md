@@ -54,6 +54,22 @@ qmd search "API" -c notes
 qmd search "API" --all --files --min-score 0.3
 ```
 
+### Remote API Mode (self-hosted)
+
+QMD supports a remote mode for embeddings, generation, and reranking via OpenAI-compatible HTTP endpoints.
+
+- Client config and behavior: `docs/QMD_REMOTE_MODE.md`
+- Server deployment (llama.cpp-native + single auth gateway): `docs/REMOTE_API_DEPLOYMENT.md`
+
+Quick client env:
+
+```bash
+export QMD_LLM_MODE=remote
+export QMD_REMOTE_API_BASE_URL=http://<server>:8080
+export QMD_REMOTE_API_KEY=<token>
+export QMD_REMOTE_API_RERANK_PATHS=/v1/rerank,/rerank,/v1/re-rank
+```
+
 ### Using with AI Agents
 
 QMD's `--json` and `--files` output formats are designed for agentic workflows:
